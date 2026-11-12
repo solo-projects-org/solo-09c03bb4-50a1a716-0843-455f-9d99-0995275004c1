@@ -39,6 +39,7 @@ class HarvestSummary:
     withdrawn: int
     retries: int
     run_id: int
+    source_endpoint: str
     status: str = "success"
     note: str | None = None
 
@@ -103,19 +104,23 @@ def _fetch_full_window(client: OAIClient, from_date: str | None,
 
 
 def harvest(client: OAIClient, *, until_date: str,
-            from_date: str | None) -> HarvestSummary:
-    """执行一次采集。from_date 为 None 时从上次成功截止日续采。"""
+            from_date: str | None, endpoint: str) -> HarvestSummary:
+    """执行一次采集。from_date 为 None 时从上次成功截止日续采。
+
+    首次成功（含无匹配）时在同一事务内把源地址与书目变更、续采进度
+    一起提交绑定；采集失败则整批回滚，不产生绑定。
+    """
     if not _HARVEST_LOCK.acquire(blocking=False):
         raise HarvestConflictError("已有采集任务正在执行，请稍后再试")
     try:
         return _harvest_locked(client, until_date=until_date,
-                               from_date=from_date)
+                               from_date=from_date, endpoint=endpoint)
     finally:
         _HARVEST_LOCK.release()
 
 
 def _harvest_locked(client: OAIClient, *, until_date: str,
-                    from_date: str | None) -> HarvestSummary:
+                    from_date: str | None, endpoint: str) -> HarvestSummary:
     conn = db.get_connection()
     run_id: int | None = None
     try:
@@ -130,9 +135,9 @@ def _harvest_locked(client: OAIClient, *, until_date: str,
             )
         except OAIError as exc:
             if exc.code == "noRecordsMatch":
-                # 无匹配：不写书目，但仍推进截止日
+                # 无匹配：不写书目，但仍推进截止日；首次成功同样绑定源地址
                 return _commit_empty_window(
-                    conn, run_id, effective_from, until_date
+                    conn, run_id, effective_from, until_date, endpoint
                 )
             raise
 
@@ -167,6 +172,8 @@ def _harvest_locked(client: OAIClient, *, until_date: str,
                     updated += 1
 
             db.advance_progress(conn, until_date)
+            # 源地址与书目变更、续采进度在同一事务内提交（新库首采/旧库补绑定）
+            db.bind_source(conn, endpoint)
             db.finish_run(
                 conn, run_id, status="success", pages=pages,
                 fetched=len(records), inserted=inserted, updated=updated,
@@ -189,6 +196,7 @@ def _harvest_locked(client: OAIClient, *, until_date: str,
             withdrawn=withdrawn,
             retries=retries,
             run_id=run_id,
+            source_endpoint=db.normalize_endpoint(endpoint),
         )
     except Exception as exc:
         # 失败：确保事务回滚，截止日不推进；另起事务记录失败历史
@@ -214,9 +222,11 @@ def _harvest_locked(client: OAIClient, *, until_date: str,
 
 
 def _commit_empty_window(conn, run_id: int, from_date: str | None,
-                         until_date: str) -> HarvestSummary:
+                         until_date: str, endpoint: str) -> HarvestSummary:
     with db.transaction(conn):
         db.advance_progress(conn, until_date)
+        # 无匹配也算一次成功采集：首次时同样在本事务内完成源地址绑定
+        db.bind_source(conn, endpoint)
         db.finish_run(
             conn, run_id, status="success", pages=0, fetched=0,
             inserted=0, updated=0, withdrawn=0, retries=0, error=None,
@@ -234,6 +244,7 @@ def _commit_empty_window(conn, run_id: int, from_date: str | None,
         withdrawn=0,
         retries=0,
         run_id=run_id,
+        source_endpoint=db.normalize_endpoint(endpoint),
         note="区间内无匹配记录，截止日已推进",
     )
 

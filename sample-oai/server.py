@@ -11,6 +11,7 @@
   PAGE_SIZE   每页记录数，默认 10
   PORT        监听端口，默认 8080
   TOKEN_TTL   resumptionToken 有效期秒数，默认 3600
+  SOURCE_NAME 源名称（Identify.repositoryName），用于区分正式/演练两个本地源
 """
 from __future__ import annotations
 
@@ -40,6 +41,9 @@ PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "10"))
 PORT = int(os.environ.get("PORT", "8080"))
 TOKEN_TTL = int(os.environ.get("TOKEN_TTL", "3600"))
 BASE_URL = os.environ.get("BASE_URL", f"http://oai-source:{PORT}/oai")
+# 同一镜像以不同 SOURCE_NAME 起两个容器（正式样例源 / 演练源）。
+# 两者刻意使用相同的 OAI 标识空间，演示误指演练源时同标识书目的覆盖风险。
+SOURCE_NAME = os.environ.get("SOURCE_NAME", "本地分页样例 OAI-PMH 源")
 
 
 def _build_records() -> list[dict]:
@@ -305,7 +309,7 @@ def _identify() -> bytes:
     root = _envelope({"verb": "Identify"})
     identify = ET.SubElement(root, f"{{{OAI_NS}}}Identify")
     values = {
-        "repositoryName": "本地分页样例 OAI-PMH 源",
+        "repositoryName": SOURCE_NAME,
         "baseURL": BASE_URL,
         "protocolVersion": "2.0",
         "adminEmail": "admin@example.test",
@@ -432,6 +436,6 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"[oai-source] sample OAI-PMH server listening on 0.0.0.0:{PORT}")
+    print(f"[oai-source] {SOURCE_NAME} listening on 0.0.0.0:{PORT}")
     print(f"[oai-source] page size={PAGE_SIZE}, records={len(RECORDS)}")
     server.serve_forever()

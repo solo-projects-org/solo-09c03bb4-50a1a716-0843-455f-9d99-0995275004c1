@@ -1,4 +1,5 @@
 services:
+  # 正式样例源：默认对接口，首次成功采集后数据卷绑定到该地址
   oai-source:
     build:
       context: ./sample-oai
@@ -9,8 +10,29 @@ services:
       PORT: "8080"
       TOKEN_TTL: "3600"
       BASE_URL: "http://oai-source:8080/oai"
+      SOURCE_NAME: "正式样例 OAI-PMH 源"
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 演练源：同一镜像、相同 OAI 标识空间，用来验证“保留数据卷换地址”
+  # 误指演练源时 API 返回 409、不访问源、不写运行历史
+  oai-source-drill:
+    build:
+      context: ./sample-oai
+    image: union-catalog/sample-oai:latest
+    environment:
+      PAGE_SIZE: "5"
+      PORT: "8080"
+      TOKEN_TTL: "3600"
+      BASE_URL: "http://oai-source-drill:8080/oai"
+      SOURCE_NAME: "演练 OAI-PMH 源（同标识空间，勿用于正式库）"
+    ports:
+      - "8081:8080"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).status==200 else 1)"]
       interval: 10s
@@ -25,8 +47,13 @@ services:
     depends_on:
       oai-source:
         condition: service_healthy
+      oai-source-drill:
+        condition: service_healthy
     environment:
       OAI_ENDPOINT: "http://oai-source:8080/oai"
+      # 旧库未绑定时，管理员须在此单独填写核实过的原地址；
+      # 仅当与 OAI_ENDPOINT 完全相同才允许补绑定并采集
+      # CONFIRMED_OAI_ENDPOINT: "http://oai-source:8080/oai"
       APP_DB_PATH: "/data/harvester.db"
     ports:
       - "8000:8000"

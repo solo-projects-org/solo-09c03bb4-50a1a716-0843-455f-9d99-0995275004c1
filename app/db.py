@@ -58,6 +58,14 @@ CREATE TABLE IF NOT EXISTS harvest_runs (
     retries         INTEGER NOT NULL DEFAULT 0,
     error           TEXT
 );
+
+-- 数据卷与 OAI 源地址的绑定：整库只允许绑定一个来源，防止重部署时
+-- 误把 OAI_ENDPOINT 指向演练源却沿用正式库数据卷、用正式库截止日覆盖书目
+CREATE TABLE IF NOT EXISTS source_binding (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    endpoint        TEXT NOT NULL,               -- 已核实并绑定的 OAI-PMH 端点
+    bound_at        TEXT NOT NULL
+);
 """
 
 
@@ -209,4 +217,56 @@ def insert_withdrawn_tombstone(conn: sqlite3.Connection, *, identifier: str,
         ON CONFLICT(identifier) DO NOTHING
         """,
         (identifier, datestamp, "{}", utc_now_iso()),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 源地址绑定：防止误把正式库数据卷接到演练源，用正式库截止日覆盖同标识书目
+# ---------------------------------------------------------------------------
+
+def normalize_endpoint(endpoint: str) -> str:
+    """端点比较前做最小归一化：去首尾空白与末尾斜杠。"""
+    return endpoint.strip().rstrip("/")
+
+
+def get_bound_endpoint(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute(
+        "SELECT endpoint FROM source_binding WHERE id = 1"
+    ).fetchone()
+    return row["endpoint"] if row else None
+
+
+def get_binding(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT endpoint, bound_at FROM source_binding WHERE id = 1"
+    ).fetchone()
+
+
+def has_local_data(conn: sqlite3.Connection) -> bool:
+    """库中是否已有书目或续采进度（用于判断新库/旧库）。"""
+    bib_count = conn.execute(
+        "SELECT COUNT(*) FROM bib_records"
+    ).fetchone()[0]
+    if bib_count > 0:
+        return True
+    progress = conn.execute(
+        "SELECT 1 FROM harvest_progress WHERE id = 1"
+    ).fetchone()
+    return progress is not None
+
+
+def bind_source(conn: sqlite3.Connection, endpoint: str) -> None:
+    """在当前事务内绑定源地址。
+
+    调用前必须由 binding.preflight 确认允许写入；此处为幂等 upsert，
+    已绑定且地址相同时不改变 bound_at。
+    """
+    normalized = normalize_endpoint(endpoint)
+    conn.execute(
+        """
+        INSERT INTO source_binding (id, endpoint, bound_at)
+        VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET endpoint = excluded.endpoint
+        """,
+        (normalized, utc_now_iso()),
     )

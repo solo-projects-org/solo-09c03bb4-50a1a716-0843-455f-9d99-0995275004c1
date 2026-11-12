@@ -7,7 +7,7 @@ from datetime import date
 
 from fastapi import FastAPI, HTTPException, Query
 
-from . import db
+from . import binding, db
 from .harvester import HarvestConflictError, harvest
 from .oai_client import OAIClient, OAIError
 from .schemas import (
@@ -16,6 +16,7 @@ from .schemas import (
     HarvestResponse,
     ProgressResponse,
     RunOut,
+    SourceBindingResponse,
 )
 
 OAI_ENDPOINT = os.environ.get(
@@ -35,9 +36,11 @@ app = FastAPI(
         "通过 OAI-PMH ListRecords(oai_dc) 按日期补采单馆书目。\n\n"
         "- 首次采集另填起始日；之后从上次成功采集的截止日（含当天）续采\n"
         "- 续页只用 resumptionToken；令牌失效则丢弃已取页、按原区间重抓一次\n"
-        "- 整批采完才在一个事务内提交书目变更和截止日，无匹配也推进截止日"
+        "- 整批采完才在一个事务内提交源地址绑定、书目变更和截止日，无匹配也推进截止日\n"
+        "- 数据卷与源地址绑定：旧库来源未确认、或当前 OAI_ENDPOINT 与已绑定地址"
+        "不符时返回 409，不访问源、不写运行历史，避免演练源覆盖正式库书目"
     ),
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -67,12 +70,24 @@ def trigger_harvest(req: HarvestRequest) -> HarvestResponse:
                 status_code=422, detail="起始日不能晚于截止日（起止日都包含）"
             )
 
+    # 源地址准入检查：未通过直接 409，此前不创建 OAI 客户端、不访问源，
+    # 也不写 harvest_runs 运行历史
+    preflight_conn = db.get_connection()
+    try:
+        try:
+            binding.preflight(preflight_conn, OAI_ENDPOINT)
+        except binding.SourceBindingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        preflight_conn.close()
+
     with OAIClient(OAI_ENDPOINT) as client:
         try:
             summary = harvest(
                 client,
                 until_date=req.until_date,
                 from_date=req.from_date,
+                endpoint=OAI_ENDPOINT,
             )
         except HarvestConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -80,7 +95,7 @@ def trigger_harvest(req: HarvestRequest) -> HarvestResponse:
             raise HTTPException(
                 status_code=502,
                 detail={
-                    "message": "采集失败，本批书目与截止日均未提交（已回滚）",
+                    "message": "采集失败，本批书目、截止日与源地址绑定均未提交（已回滚）",
                     "oai_error": exc.code,
                     "detail": exc.message,
                 },
@@ -165,6 +180,27 @@ def get_progress() -> ProgressResponse:
         if row is None:
             return ProgressResponse(last_until=None, last_harvest_at=None)
         return ProgressResponse(**dict(row))
+    finally:
+        conn.close()
+
+
+@app.get(
+    "/api/v1/source-binding",
+    response_model=SourceBindingResponse,
+    summary="查询数据卷与 OAI 源地址的绑定状态",
+    tags=["进度"],
+)
+def get_source_binding() -> SourceBindingResponse:
+    conn = db.get_connection()
+    try:
+        row = db.get_binding(conn)
+        return SourceBindingResponse(
+            bound_endpoint=row["endpoint"] if row else None,
+            bound_at=row["bound_at"] if row else None,
+            current_endpoint=db.normalize_endpoint(OAI_ENDPOINT),
+            has_local_data=db.has_local_data(conn),
+            confirmed_endpoint=binding.get_confirmed_endpoint(),
+        )
     finally:
         conn.close()
 

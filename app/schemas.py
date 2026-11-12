@@ -35,7 +35,25 @@ class HarvestResponse(BaseModel):
     withdrawn: int = Field(..., description="因删除标记撤下的记录数")
     retries: int = Field(..., description="令牌失效后按原区间重抓的次数（0 或 1）")
     run_id: int
+    source_endpoint: str = Field(
+        ..., description="本次采集所使用并绑定（或已绑定）的 OAI-PMH 源地址"
+    )
     note: str | None = None
+
+
+class SourceBindingResponse(BaseModel):
+    bound_endpoint: str | None = Field(
+        None, description="该数据卷已绑定的 OAI-PMH 源地址；null 表示尚未绑定"
+    )
+    current_endpoint: str = Field(..., description="服务当前配置的 OAI_ENDPOINT")
+    has_local_data: bool = Field(
+        ..., description="库中是否已有书目或续采进度（旧库=true）"
+    )
+    bound_at: str | None = None
+    confirmed_endpoint: str | None = Field(
+        None,
+        description="管理员通过 CONFIRMED_OAI_ENDPOINT 填写的核实地址（如有）",
+    )
 
 
 class ProgressResponse(BaseModel):

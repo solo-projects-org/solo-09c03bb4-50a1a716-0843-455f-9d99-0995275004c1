@@ -34,7 +34,8 @@ print("采集前 last_until:", before)
 
 try:
     harvester.harvest(
-        FlakyClient(), until_date="2026-10-27", from_date="2026-10-01"
+        FlakyClient(), until_date="2026-10-27", from_date="2026-10-01",
+        endpoint="http://oai-source:8080/oai",
     )
 except OAIError as e:
     print("预期失败抛出:", e)
